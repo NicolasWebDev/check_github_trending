@@ -1,60 +1,19 @@
 #! /bin/bash
 
-set -e
-
 # Features:
 # When passed a list of github repos, find out the ones I have never checked and the ones that I have checked in the past, but the last time was more than N months ago.
 # Those are the ones that I should check, so I should open them in the browser.
-# I should create/update them in buku and set their timestamp to today.
+# I should create/update them in in the database and set their timestamp to today.
 # Cases:
 # - never checked -> insert them w/date to today, open in browser
 # - already checked, less than N months ago -> nothing
 # - already checked, more than N months ago -> update them w/date to today, open in browser
 
-insert_all_repos() {
-    for url in $(cat $repos_file); do
-        buku --add "$url" github trending -c checked "$(today)" >/dev/null
-    done
-}
+set -e
 
-update_and_open_stale_repo() {
-    local url="$1"
-
-    local buku_id=$(buku --json --sreg "^$url$" | jq --raw-output '.[0].index')
-    buku --update $buku_id --comment checked $(today)
-    open_repo $url
-}
-
-open_repo() {
-    local url="$1"
-
-    chromium $url >&/dev/null &
-}
-
-is_description_format_wrong() {
-    local description="$1"
-
-    echo $description | grep -qv "^checked [0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}$"
-}
-
-update_and_open_stale_repos() {
-    for url in $(cat $repos_file); do
-        local description=$(buku --json --sreg "^$url$" | jq --raw-output '.[0].description')
-        local last_update_date=$(echo "$description" | cut -d' ' -f2)
-        if [ "$last_update_date" == $(today) ]; then
-            open_repo "$url"
-        elif is_description_format_wrong "$description" || [[ $last_update_date < $(months_ago 4) ]]; then
-            update_and_open_stale_repo "$url"
-        fi
-    done
-}
-
-check_github_trending_repos() {
-    local repos_file="$1"
-
-    insert_all_repos
-    update_and_open_stale_repos
-}
+CURRENTLY_TRENDING_REPOS_FILE="currently_trending_repos.txt"
+DB_FILE="$HOME/.check_github_trending.db.txt"
+MONTHS_TO_CONSIDER_REPO_STALE=4
 
 today() {
     date +"%Y-%m-%d"
@@ -64,4 +23,70 @@ months_ago() {
     date -d "-${1} month" +"%Y-%m-%d"
 }
 
-check_github_trending_repos urls.txt
+repo_was_never_reviewed() {
+    local repo="$1"
+
+    ! grep -q "$1$" "$DB_FILE"
+}
+
+find_last_review_date() {
+    local repo="$1"
+
+    grep "$1$" "$DB_FILE" | tail -1 | cut -d ' ' -f 1
+}
+
+repo_was_reviewed_a_long_time_ago() {
+    local repo="$1"
+
+    [[ "$(find_last_review_date "$repo")" < "$(months_ago "$MONTHS_TO_CONSIDER_REPO_STALE")" ]]
+}
+
+review_repo() {
+    local repo="$1"
+
+    mark_repo_as_reviewed "$repo"
+    open_repo_in_browser "$repo"
+}
+
+open_repo_in_browser() {
+    local repo="$1"
+
+    $BROWSER "$repo" >&/dev/null
+}
+
+mark_repo_as_reviewed() {
+    local repo="$1"
+
+    echo "$(today) $repo" >>$DB_FILE
+}
+
+check() {
+    local repo="$1"
+
+    if repo_was_never_reviewed "$repo"; then
+        echo "The repo $repo was never reviewed"
+        review_repo "$repo"
+    elif repo_was_reviewed_a_long_time_ago "$repo"; then
+        echo "The repo $repo was reviewed a long time ago"
+        review_repo "$repo"
+    else
+        echo "The repo $repo was already reviewed"
+    fi
+}
+
+create_database_if_not_present() {
+    if [[ ! -f "$DB_FILE" ]]; then
+        echo "New database file created with path: $DB_FILE"
+        touch "$DB_FILE"
+    fi
+}
+
+check_github_trending_repos() {
+    create_database_if_not_present
+
+    while read -r currently_trending_repo; do
+        check "$currently_trending_repo"
+    done <"$CURRENTLY_TRENDING_REPOS_FILE"
+}
+
+check_github_trending_repos
